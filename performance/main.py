@@ -2,6 +2,7 @@ import time
 import cv2
 import typer
 import asyncio
+import multiprocessing as mp
 
 from typing import Callable, List
 from pathlib import Path
@@ -77,13 +78,23 @@ def decorate_result(
         result.append("")
     return "\n".join(result)
 
-async def submit_with(submitter, model_inputs):
+async def submit_with(submitter, input_queues, num_target = 5000):
     idx = 0
-    for model_input, context in tqdm(model_inputs, desc="Inference"):
-        await submitter.submit(model_input, context=(context, idx, ))
+    run = [True for _ in range(5)]
+    end = 0
+    while end != 5:
+        for id_ in range(5):
+            if not run[id_]:
+                continue
+            model_input, context = input_queues[id_].get()
+            if model_input is None:
+                end += 1
+                run[id_] = False
+                continue
+            await submitter.submit(model_input, context=(context, idx%5, ))
         idx += 1
 
-async def recv_with(receiver, model_outputs, input_imgs):
+async def recv_with(receiver, output_queues):
     while True:
         try:
             async def recv():
@@ -92,64 +103,77 @@ async def recv_with(receiver, model_outputs, input_imgs):
 
             task = asyncio.create_task(recv())
             (context, idx), outputs = await asyncio.wait_for(task, timeout=0.1)
-            model_outputs.append((outputs, context, input_imgs[idx]))
+            output_queues[idx].put((outputs, context))
         except asyncio.TimeoutError:  
             break
 
-    return model_outputs
+    return None
 
-async def warboy_inference(submitter, receiver, model_inputs, model_outputs, input_imgs):
+async def warboy_inference(submitter, receiver, input_queues, output_queues):
     model_ouputs = []
-    submit_task = asyncio.create_task(submit_with(submitter, model_inputs))
-    recv_task = asyncio.create_task(recv_with(receiver, model_outputs, input_imgs))
+    submit_task = asyncio.create_task(submit_with(submitter, input_queues))
+    recv_task = asyncio.create_task(recv_with(receiver, output_queues))
     await submit_task
-    outputs = await recv_task
-    return outputs
+    await recv_task
+    return None
+
+def preprocess_task(input_paths: str, preprocess:Callable, input_queue: mp.Queue, img_queue: mp.Queue, idx: int):
+    id_ = 0
+    for input_path in tqdm(input_paths, desc="Preprocess"):
+        if id_ % 5 == idx:
+            img = cv2.imread(input_path)
+            img_queue.put(img)
+            input_queue.put(preprocess(img))
+        id_ += 1
+    
+    img_queue.put(None)
+    input_queue.put((None, None))
+    return
+
+def postprocess_task(postprocess: Callable, output_queue: mp.Queue, img_queue: mp.Queue, num_target=5000):
+    idx = 0
+    last_idx = 0
+    while True:
+        input_img = img_queue.get()
+        if input_img is None:
+            break
+        output, context = output_queue.get()
+        postprocess(output, context, input_img)
+        idx += 1
 
 async def run_inference(
     model: str,
     input_paths: str,
     preprocess: Callable,
     postprocess: Callable,
-    device_str="warboy(2)*1",
+    device_str:str = "warboy(2)*1"
 ):
     warning = """WARN: the benchmark results may depend on the number of input samples,sizes of the images, and a machine where this benchmark is running."""
     queries = len(input_paths)
     print(f"Run benchmark on {queries} input samples ...")
     print(decorate_with_bar(warning))
+    input_queues = [mp.Queue(maxsize=100) for _ in range(5)]
+    img_queues = [mp.Queue(maxsize=100) for _ in range(5)]
+    output_queues = [mp.Queue(maxsize=100) for _ in range(5)]
 
-    async with create_queue(model = model, device=device_str, worker_num = 16) as (submitter, receiver):
-        model_inputs, model_outputs, input_imgs = [], [], []
-        
-        initial_time = time.perf_counter()
-        for input_path in tqdm(input_paths, desc="Preprocess"):
-            img = cv2.imread(input_path)
-            input_imgs.append(img)
-            model_inputs.append(preprocess(img))
+    preprocs = [mp.Process(target = preprocess_task, args=(input_paths, preprocess, input_queues[idx], img_queues[idx], idx)) for idx in range(5)]
+    postprocs = [mp.Process(target=postprocess_task, args=(postprocess, output_queues[idx], img_queues[idx])) for idx in range(5)]
 
-        after_preprocess = time.perf_counter()
-        outputs = await warboy_inference(submitter, receiver, model_inputs, model_outputs, input_imgs)
-        after_npu = time.perf_counter()
-
-        for output, context, input_img in tqdm(
-            outputs, desc="Postprocess"
-        ):
-            postprocess(output, context, input_img)
-        all_done = time.perf_counter()
-
+    initial_time = time.perf_counter()
+    async with create_queue(model = model, device=device_str, worker_num = 32) as (submitter, receiver):
+        for preproc in preprocs:
+            preproc.start()
+        for postproc in postprocs:
+            postproc.start()
+        outputs = await warboy_inference(submitter, receiver, input_queues, output_queues)
+        for preproc in preprocs:
+            preproc.join()
+        for postproc in postprocs:
+            postproc.join()
+    all_done = time.perf_counter()
     print(
         decorate_result(
             all_done - initial_time, queries, "Preprocess -> Inference -> Postprocess"
-        )
-    )
-    print(
-        decorate_result(
-            all_done - after_preprocess, queries, "Inference -> Postprocess"
-        )
-    )
-    print(
-        decorate_result(
-            after_npu - after_preprocess, queries, "Inference", newline=False
         )
     )
 
@@ -172,7 +196,7 @@ def resolve_input_paths(input_path: Path) -> List[str]:
 
 @app.command("bench", help="Run benchmark on a model")
 def benchmark_model(model: str, input_path: str):
-    input_paths = resolve_input_paths(Path(input_path))[:100]
+    input_paths = resolve_input_paths(Path(input_path))
     if len(input_paths) == 0:
         typer.echo(f"No input files found in '{input_path}'")
         raise typer.Exit(code=1)
@@ -191,6 +215,3 @@ def benchmark_model(model: str, input_path: str):
 
 if __name__ == "__main__":
     app()
-
-
-
