@@ -141,40 +141,104 @@ def postprocess_task(postprocess: Callable, output_queue: mp.Queue, img_queue: m
         postprocess(output, context, input_img)
         idx += 1
 
+# async def run_inference(
+#     model: str,
+#     input_paths: str,
+#     preprocess: Callable,
+#     postprocess: Callable,
+#     device_str:str = "warboy(2)*1"
+# ):
+#     warning = """WARN: the benchmark results may depend on the number of input samples,sizes of the images, and a machine where this benchmark is running."""
+#     queries = len(input_paths)
+#     print(f"Run benchmark on {queries} input samples ...")
+#     print(decorate_with_bar(warning))
+#     input_queues = [mp.Queue(maxsize=100) for _ in range(5)]
+#     img_queues = [mp.Queue(maxsize=100) for _ in range(5)]
+#     output_queues = [mp.Queue(maxsize=100) for _ in range(5)]
+
+#     preprocs = [mp.Process(target = preprocess_task, args=(input_paths, preprocess, input_queues[idx], img_queues[idx], idx)) for idx in range(5)]
+#     postprocs = [mp.Process(target=postprocess_task, args=(postprocess, output_queues[idx], img_queues[idx])) for idx in range(5)]
+
+#     initial_time = time.perf_counter()
+#     async with create_queue(model = model, device=device_str, worker_num = 32) as (submitter, receiver):
+#         for preproc in preprocs:
+#             preproc.start()
+#         for postproc in postprocs:
+#             postproc.start()
+#         outputs = await warboy_inference(submitter, receiver, input_queues, output_queues)
+#         for preproc in preprocs:
+#             preproc.join()
+#         for postproc in postprocs:
+#             postproc.join()
+#     all_done = time.perf_counter()
+#     print(
+#         decorate_result(
+#             all_done - initial_time, queries, "Preprocess -> Inference -> Postprocess"
+#         )
+#     )
+
 async def run_inference(
     model: str,
     input_paths: str,
     preprocess: Callable,
     postprocess: Callable,
-    device_str:str = "warboy(2)*1"
+    device_str: str = "warboy(2)*1"
 ):
-    warning = """WARN: the benchmark results may depend on the number of input samples,sizes of the images, and a machine where this benchmark is running."""
+    warning = """WARN: the benchmark results may depend on the number of input samples, sizes of the images, and a machine where this benchmark is running."""
     queries = len(input_paths)
     print(f"Run benchmark on {queries} input samples ...")
     print(decorate_with_bar(warning))
+
+    # Khởi tạo hàng đợi
     input_queues = [mp.Queue(maxsize=100) for _ in range(5)]
     img_queues = [mp.Queue(maxsize=100) for _ in range(5)]
     output_queues = [mp.Queue(maxsize=100) for _ in range(5)]
 
-    preprocs = [mp.Process(target = preprocess_task, args=(input_paths, preprocess, input_queues[idx], img_queues[idx], idx)) for idx in range(5)]
+    # Khởi tạo tiến trình tiền xử lý và hậu xử lý
+    preprocs = [mp.Process(target=preprocess_task, args=(input_paths, preprocess, input_queues[idx], img_queues[idx], idx)) for idx in range(5)]
     postprocs = [mp.Process(target=postprocess_task, args=(postprocess, output_queues[idx], img_queues[idx])) for idx in range(5)]
 
-    # initial_time = time.perf_counter()
-    async with create_queue(model = model, device=device_str, worker_num = 32) as (submitter, receiver):
-        initial_time = time.perf_counter()
+    # Ghi lại thời gian bắt đầu toàn bộ quá trình
+    initial_time = time.perf_counter()
+
+    async with create_queue(model=model, device=device_str, worker_num=32) as (submitter, receiver):
         for preproc in preprocs:
             preproc.start()
+        
+        # Thời gian hoàn thành tiền xử lý
+        after_preprocess = time.perf_counter()
+
         for postproc in postprocs:
             postproc.start()
+
+        # Bắt đầu suy luận
         outputs = await warboy_inference(submitter, receiver, input_queues, output_queues)
+
+        # Thời gian hoàn thành suy luận
+        after_npu = time.perf_counter()
+
         for preproc in preprocs:
             preproc.join()
         for postproc in postprocs:
             postproc.join()
+
+    # Ghi lại thời gian hoàn thành toàn bộ quá trình
     all_done = time.perf_counter()
+
+    # In thời gian của từng giai đoạn
     print(
         decorate_result(
             all_done - initial_time, queries, "Preprocess -> Inference -> Postprocess"
+        )
+    )
+    print(
+        decorate_result(
+            all_done - after_preprocess, queries, "Inference -> Postprocess"
+        )
+    )
+    print(
+        decorate_result(
+            after_npu - after_preprocess, queries, "Inference", newline=False
         )
     )
 
