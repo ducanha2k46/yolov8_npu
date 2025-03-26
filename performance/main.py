@@ -159,8 +159,9 @@ async def run_inference(
     preprocs = [mp.Process(target = preprocess_task, args=(input_paths, preprocess, input_queues[idx], img_queues[idx], idx)) for idx in range(5)]
     postprocs = [mp.Process(target=postprocess_task, args=(postprocess, output_queues[idx], img_queues[idx])) for idx in range(5)]
 
-    initial_time = time.perf_counter()
+    # initial_time = time.perf_counter()
     async with create_queue(model = model, device=device_str, worker_num = 32) as (submitter, receiver):
+        initial_time = time.perf_counter()
         for preproc in preprocs:
             preproc.start()
         for postproc in postprocs:
