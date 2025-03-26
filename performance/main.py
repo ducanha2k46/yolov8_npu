@@ -172,7 +172,7 @@ def resolve_input_paths(input_path: Path) -> List[str]:
 
 @app.command("bench", help="Run benchmark on a model")
 def benchmark_model(model: str, input_path: str):
-    input_paths = resolve_input_paths(Path(input_path))[:100]
+    input_paths = resolve_input_paths(Path(input_path))[:200]
     if len(input_paths) == 0:
         typer.echo(f"No input files found in '{input_path}'")
         raise typer.Exit(code=1)
@@ -191,3 +191,6 @@ def benchmark_model(model: str, input_path: str):
 
 if __name__ == "__main__":
     app()
+
+
+
